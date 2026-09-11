@@ -224,9 +224,9 @@ class MainActivity : AppCompatActivity() {
                 .setTargetResolution(Size(720, 1280))
                 .setTargetRotation(Surface.ROTATION_0)
                 .build()
-            preview.surfaceProvider = Preview.SurfaceProvider { request ->
+            preview.setSurfaceProvider(Preview.SurfaceProvider { request ->
                 glView.queueEvent { renderer.attachSurfaceRequest(request) }
-            }
+            })
             val analysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(480, 640))
                 .setTargetRotation(Surface.ROTATION_0)

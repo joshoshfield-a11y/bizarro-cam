@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.BizarroCam" parent="Theme.MaterialComponents.Dark.NoActionBar">
+    <style name="Theme.BizarroCam" parent="Theme.Material3.Dark.NoActionBar">
         <item name="colorPrimary">@color/neon</item>
         <item name="colorPrimaryVariant">@color/neon</item>
         <item name="colorSecondary">@color/magenta</item>

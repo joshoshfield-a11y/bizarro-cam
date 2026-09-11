@@ -18,36 +18,13 @@ void main() {
     const val GRID_VERT = """
 attribute vec2 aPos;
 attribute vec2 aUV;
+attribute vec2 aDisp;
+attribute vec2 aWarp;
 uniform mat4 uTexMatrix;
-uniform float uMeshAmp;
-uniform float uTime;
-uniform float uMorph;
-uniform float uPointCount;
-uniform vec2 uPoints[128];
 varying vec2 vUV;
-varying vec2 vWarp;
 void main() {
-    vec2 uv = aUV;
-    vec2 disp = vec2(0.0);
-    float wsum = 0.0;
-    vec2 mwarp = vec2(0.0);
-    for (int i = 0; i < 128; i++) {
-        float en = step(float(i), uPointCount - 0.5);
-        vec2 dv = uv - uPoints[i];
-        float l = length(dv) + 1e-4;
-        float infl = 0.012 / (l * l * 18.0 + 0.02);
-        disp += (dv / l) * infl * en;
-        wsum += infl * en;
-        float l2 = l * l;
-        mwarp += dv * (1.0 / (l2 * 160.0 + 0.6)) * en;
-    }
-    disp /= max(wsum, 1e-3);
-    float n1 = sin(uv.y * 21.0 + uTime * 1.9) * cos(uv.x * 17.0 - uTime * 1.3);
-    float n2 = sin(uv.x * 29.0 - uTime * 2.3 + uv.y * 7.0);
-    vec2 total = disp * uMeshAmp * 0.10 + vec2(n1, n2) * 0.006 * uMeshAmp;
-    vWarp = mwarp * uMorph * 0.10;
-    gl_Position = vec4(aPos + total * 2.0, 0.0, 1.0);
-    vUV = (uTexMatrix * vec4(uv + total * 0.6, 0.0, 1.0)).xy;
+    gl_Position = vec4(aPos + aDisp * 2.0, 0.0, 1.0);
+    vUV = (uTexMatrix * vec4(aUV + aWarp, 0.0, 1.0)).xy;
 }
 """
 
@@ -102,7 +79,6 @@ uniform float uSlit;
 uniform float uKaleido;
 uniform float uInvert;
 uniform float uScan;
-varying vec2 vWarp;
 
 vec3 rgb2hsv(vec3 c) {
     vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
@@ -156,10 +132,6 @@ void main() {
         puv = vec2(uv.x, fract(uv.y + ph * uSlit));
     }
     vec3 prev = texture2D(uPrev, puv).rgb;
-
-    if (uMorph > 0.001) {
-        uv = clamp(uv + vWarp, 0.0, 1.0);
-    }
 
     vec4 dm = texture2D(uDisp, uv);
     uv = clamp(uv + (dm.rg * 2.0 - 1.0) * uDisplace * 0.08, 0.0, 1.0);

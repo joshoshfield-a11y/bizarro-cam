@@ -21,6 +21,7 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.mlkit.vision.MLKitAnalyzer
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -244,9 +245,20 @@ class MainActivity : AppCompatActivity() {
                 .setTargetRotation(Surface.ROTATION_0)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-            analysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                faceTracker.analyze(imageProxy)
+            val mlAnalyzer = MLKitAnalyzer(
+                faceTracker.detector,
+                ImageAnalysis.COORDINATE_SYSTEM_VIEW_REFERENCED,
+                cameraExecutor
+            ) { result ->
+                val faces = result.getValue(faceTracker.detector) ?: emptyList()
+                val sz = result.size
+                if (sz != null) {
+                    faceTracker.frameW = sz.width
+                    faceTracker.frameH = sz.height
+                }
+                faceTracker.onFaces(faces)
             }
+            analysis.setAnalyzer(cameraExecutor, mlAnalyzer)
             val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
             try {
                 camera = provider.bindToLifecycle(this, selector, preview, analysis)

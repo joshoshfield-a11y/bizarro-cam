@@ -51,8 +51,8 @@ class EffectsRenderer(
         private const val STAGE_W = 720
         private const val STAGE_H = 1280
         private const val DISP = 512
-        private const val GRID_COLS = 48
-        private const val GRID_ROWS = 86
+        private const val GRID_COLS = 40
+        private const val GRID_ROWS = 72
         private const val MAXP = 128
     }
 
@@ -68,14 +68,11 @@ class EffectsRenderer(
     @Volatile var takeSnapshot = false
     @Volatile var fps = 0f
     @Volatile var shaderStatus = "?"
+    @Volatile var shaderError = ""
 
     private fun onoff(v: Int): String = if (v > 0) "1" else "0"
 
     @Volatile var frontCamera = false
-        set(v) {
-            field = v
-            faceTracker.frontFacing = v
-        }
 
     private val mainExecutor = ContextCompat.getMainExecutor(context)
     private val ioExecutor = Executors.newSingleThreadExecutor()
@@ -126,6 +123,10 @@ class EffectsRenderer(
     private var gridIbo = 0
     private var gridIndexCount = 0
     private var lineVbo = 0
+    private var vertCount = 0
+    private var gridData = FloatArray(0)
+    private val pxx = FloatArray(MAXP)
+    private val pyy = FloatArray(MAXP)
 
     private var viewW = 1
     private var viewH = 1
@@ -254,6 +255,9 @@ class EffectsRenderer(
         progRaw = buildProgram(ShaderStore.QUAD_VERT, ShaderStore.RAW_FRAG)
         shaderStatus = "disp=" + onoff(progDisp) + " comp=" + onoff(progComposite) +
             " blit=" + onoff(progBlit) + " line=" + onoff(progLine) + " raw=" + onoff(progRaw)
+        if (shaderError.isNotEmpty()) {
+            shaderStatus += " err[" + shaderError.replace("\n", " ").take(60) + "]"
+        }
         Log.i(TAG, "shader status: " + shaderStatus)
 
         val quad = floatArrayOf(
@@ -269,16 +273,21 @@ class EffectsRenderer(
 
         val cols = GRID_COLS + 1
         val rows = GRID_ROWS + 1
-        val gv = FloatArray(cols * rows * 4)
+        vertCount = cols * rows
+        gridData = FloatArray(vertCount * 8)
         var vi = 0
         for (r in 0 until rows) {
             for (c in 0 until cols) {
                 val u = c / GRID_COLS.toFloat()
                 val vv = r / GRID_ROWS.toFloat()
-                gv[vi++] = u * 2f - 1f
-                gv[vi++] = vv * 2f - 1f
-                gv[vi++] = u
-                gv[vi++] = vv
+                gridData[vi++] = u * 2f - 1f
+                gridData[vi++] = vv * 2f - 1f
+                gridData[vi++] = u
+                gridData[vi++] = vv
+                gridData[vi++] = 0f
+                gridData[vi++] = 0f
+                gridData[vi++] = 0f
+                gridData[vi++] = 0f
             }
         }
         gridIndexCount = GRID_COLS * GRID_ROWS * 6
@@ -301,7 +310,7 @@ class EffectsRenderer(
         GLES20.glGenBuffers(1, ids, 0)
         gridVbo = ids[0]
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, gridVbo)
-        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, gv.size * 4, floatBuffer(gv), GLES20.GL_STATIC_DRAW)
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, gridData.size * 4, floatBuffer(gridData), GLES20.GL_STREAM_DRAW)
         GLES20.glGenBuffers(1, ids, 0)
         gridIbo = ids[0]
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, gridIbo)
@@ -369,6 +378,13 @@ class EffectsRenderer(
         }
         st.getTransformMatrix(texMatrix)
         val t = (SystemClock.elapsedRealtime() - startMs) / 1000f
+        fpsCount++
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - fpsTime > 1000) {
+            fps = fpsCount * 1000f / (nowMs - fpsTime).coerceAtLeast(1)
+            fpsCount = 0
+            fpsTime = nowMs
+        }
         val prevIdx = curIdx xor 1
 
         if (progDisp > 0) {
@@ -398,7 +414,7 @@ class EffectsRenderer(
             motionTracker.update(buf, DISP, DISP)
         }
 
-        buildPointArray()
+        updateGridBuffers(t)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
         if (progComposite <= 0 && progRaw > 0) {
@@ -447,12 +463,6 @@ class EffectsRenderer(
             GLES20.glUniform1f(glLoc(progComposite, "uKaleido"), param("kaleido"))
             GLES20.glUniform1f(glLoc(progComposite, "uInvert"), param("invert"))
             GLES20.glUniform1f(glLoc(progComposite, "uScan"), param("scan"))
-            GLES20.glUniform1f(glLoc(progComposite, "uMorph"), param("morph"))
-            GLES20.glUniform1f(glLoc(progComposite, "uMeshAmp"), param("displace"))
-            GLES20.glUniform1f(glLoc(progComposite, "uPointCount"), pointCount.toFloat())
-            if (pointCount > 0) {
-                GLES20.glUniform2fv(glLoc(progComposite, "uPoints"), MAXP, pointArr, 0)
-            }
             drawGrid()
         }
 
@@ -477,14 +487,6 @@ class EffectsRenderer(
         }
 
         curIdx = prevIdx
-
-        fpsCount++
-        val now = SystemClock.elapsedRealtime()
-        if (now - fpsTime > 1000) {
-            fps = fpsCount * 1000f / (now - fpsTime).coerceAtLeast(1)
-            fpsCount = 0
-            fpsTime = now
-        }
     }
 
     // ---------------------------------------------------------------- passes
@@ -605,25 +607,62 @@ class EffectsRenderer(
 
     // ---------------------------------------------------------------- utils
 
-    private val pointArr = FloatArray(MAXP * 2)
-    private var pointCount = 0
-
-    private fun buildPointArray() {
+    private fun updateGridBuffers(t: Float) {
         var n = 0
         val fp = faceTracker.points
         val fn = kotlin.math.min(faceTracker.count, MAXP - 30)
         for (i in 0 until fn) {
-            pointArr[n * 2] = fp[i * 2]
-            pointArr[n * 2 + 1] = fp[i * 2 + 1]
+            pxx[n] = fp[i * 2]
+            pyy[n] = fp[i * 2 + 1]
             n++
         }
         for (tk in motionTracker.tracks) {
             if (n >= MAXP) break
-            pointArr[n * 2] = tk.cx
-            pointArr[n * 2 + 1] = tk.cy
+            pxx[n] = tk.cx
+            pyy[n] = tk.cy
             n++
         }
-        pointCount = n
+        val meshAmp = param("displace")
+        val morph = param("morph")
+        val t1 = t * 1.9f
+        val t2 = t * 1.3f
+        val t3 = t * 2.3f
+        var v = 0
+        while (v < vertCount) {
+            val o = v * 8
+            val u = gridData[o + 2]
+            val vv = gridData[o + 3]
+            var dx = 0f
+            var dy = 0f
+            var wx = 0f
+            var wy = 0f
+            var wsum = 0f
+            for (k in 0 until n) {
+                val dvx = u - pxx[k]
+                val dvy = vv - pyy[k]
+                val l = kotlin.math.hypot(dvx, dvy) + 1e-4f
+                val infl = 0.012f / (l * l * 18f + 0.02f)
+                dx += dvx / l * infl
+                dy += dvy / l * infl
+                wsum += infl
+                val inv = 1f / (l * l * 160f + 0.6f)
+                wx += dvx * inv
+                wy += dvy * inv
+            }
+            if (wsum > 1e-3f) {
+                dx /= wsum
+                dy /= wsum
+            }
+            val n1 = kotlin.math.sin(vv * 21f + t1) * kotlin.math.cos(u * 17f - t2)
+            val n2 = kotlin.math.sin(u * 29f - t3 + vv * 7f)
+            gridData[o + 4] = dx * meshAmp * 0.10f + n1 * 0.006f * meshAmp
+            gridData[o + 5] = dy * meshAmp * 0.10f + n2 * 0.006f * meshAmp
+            gridData[o + 6] = wx * morph * 0.10f
+            gridData[o + 7] = wy * morph * 0.10f
+            v++
+        }
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, gridVbo)
+        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, gridData.size * 4, floatBuffer(gridData), GLES20.GL_STREAM_DRAW)
     }
 
     private fun computeCrop(vw: Int, vh: Int): FloatArray {
@@ -682,13 +721,21 @@ class EffectsRenderer(
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, gridIbo)
         val aPos = GLES20.glGetAttribLocation(progComposite, "aPos")
         val aUV = GLES20.glGetAttribLocation(progComposite, "aUV")
+        val aDisp = GLES20.glGetAttribLocation(progComposite, "aDisp")
+        val aWarp = GLES20.glGetAttribLocation(progComposite, "aWarp")
         GLES20.glEnableVertexAttribArray(aPos)
-        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 16, 0)
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 32, 0)
         GLES20.glEnableVertexAttribArray(aUV)
-        GLES20.glVertexAttribPointer(aUV, 2, GLES20.GL_FLOAT, false, 16, 8)
+        GLES20.glVertexAttribPointer(aUV, 2, GLES20.GL_FLOAT, false, 32, 8)
+        GLES20.glEnableVertexAttribArray(aDisp)
+        GLES20.glVertexAttribPointer(aDisp, 2, GLES20.GL_FLOAT, false, 32, 16)
+        GLES20.glEnableVertexAttribArray(aWarp)
+        GLES20.glVertexAttribPointer(aWarp, 2, GLES20.GL_FLOAT, false, 32, 24)
         GLES20.glDrawElements(GLES20.GL_TRIANGLES, gridIndexCount, GLES20.GL_UNSIGNED_SHORT, 0)
         GLES20.glDisableVertexAttribArray(aPos)
         GLES20.glDisableVertexAttribArray(aUV)
+        GLES20.glDisableVertexAttribArray(aDisp)
+        GLES20.glDisableVertexAttribArray(aWarp)
     }
 
     private fun glLoc(prog: Int, name: String): Int = GLES20.glGetUniformLocation(prog, name)
@@ -712,7 +759,8 @@ class EffectsRenderer(
         val ok = IntArray(1)
         GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, ok, 0)
         if (ok[0] == 0) {
-            Log.e(TAG, "link fail: " + GLES20.glGetProgramInfoLog(p))
+            shaderError = GLES20.glGetProgramInfoLog(p)?.take(140) ?: "link failed"
+            Log.e(TAG, "link fail: " + shaderError)
             return 0
         }
         return p
@@ -725,7 +773,8 @@ class EffectsRenderer(
         val ok = IntArray(1)
         GLES20.glGetShaderiv(s, GLES20.GL_COMPILE_STATUS, ok, 0)
         if (ok[0] == 0) {
-            Log.e(TAG, "shader fail: " + GLES20.glGetShaderInfoLog(s))
+            shaderError = GLES20.glGetShaderInfoLog(s)?.take(140) ?: "compile failed"
+            Log.e(TAG, "shader fail: " + shaderError)
             return 0
         }
         return s

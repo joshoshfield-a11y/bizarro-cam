@@ -16,6 +16,8 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
 class FaceTracker {
 
     @Volatile var frontFacing = false
+    @Volatile var overlayRotation = 0
+    @Volatile var overlayMirror = false
     @Volatile var points = FloatArray(0)
     @Volatile var wire = FloatArray(0)
     @Volatile var boxes = FloatArray(0)
@@ -56,21 +58,50 @@ class FaceTracker {
     }
 
     private fun mapX(x: Float, y: Float, w: Int, h: Int, rot: Int): Float {
-        var nx = when (rot) {
-            90 -> 1f - y / h
+        val nx = when (rot) {
+            90 -> y / h
             180 -> 1f - x / w
-            270 -> y / h
+            270 -> 1f - y / h
             else -> x / w
         }
-        if (frontFacing) nx = 1f - nx
-        return nx
+        return finalizeX(nx, mapY0(x, y, w, h, rot))
     }
 
-    private fun mapY(x: Float, y: Float, w: Int, h: Int, rot: Int): Float = when (rot) {
-        90 -> x / w
+    private fun mapY0(x: Float, y: Float, w: Int, h: Int, rot: Int): Float = when (rot) {
+        90 -> 1f - x / w
         180 -> 1f - y / h
-        270 -> 1f - x / w
+        270 -> x / w
         else -> y / h
+    }
+
+    private fun mapY(x: Float, y: Float, w: Int, h: Int, rot: Int): Float =
+        finalizeY(when (rot) {
+            90 -> y / h
+            180 -> 1f - x / w
+            270 -> 1f - y / h
+            else -> x / w
+        }, mapY0(x, y, w, h, rot))
+
+    // user-calibratable residual transform (long-press WIRE cycles it)
+    private fun finalizeX(nx: Float, ny: Float): Float {
+        val x = if (frontFacing) 1f - nx else nx
+        val rx = when (overlayRotation) {
+            1 -> ny
+            2 -> 1f - x
+            3 -> 1f - ny
+            else -> x
+        }
+        return if (overlayMirror) 1f - rx else rx
+    }
+
+    private fun finalizeY(nx: Float, ny: Float): Float {
+        val x = if (frontFacing) 1f - nx else nx
+        return when (overlayRotation) {
+            1 -> 1f - x
+            2 -> 1f - ny
+            3 -> x
+            else -> ny
+        }
     }
 
     private fun publish(faces: List<Face>, w: Int, h: Int, rot: Int) {

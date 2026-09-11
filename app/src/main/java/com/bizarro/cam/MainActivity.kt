@@ -95,6 +95,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Encoder: $msg", Toast.LENGTH_LONG).show()
             }
         }
+        renderer.onContextRecreated = { runOnUiThread { bindCamera() } }
         renderer.onSnapshotSaved = { path ->
             runOnUiThread { Toast.makeText(this, "PNG:\n$path", Toast.LENGTH_SHORT).show() }
         }
@@ -105,8 +106,19 @@ class MainActivity : AppCompatActivity() {
         txtStats = findViewById(R.id.txtStats)
         buildSliders()
         findViewById<Button>(R.id.btnFlip).setOnClickListener { flipCamera() }
-        findViewById<Button>(R.id.btnWire).setOnClickListener {
+        val btnWire = findViewById<Button>(R.id.btnWire)
+        btnWire.setOnClickListener {
             renderer.wireframe = !renderer.wireframe
+        }
+        btnWire.setOnLongClickListener {
+            faceTracker.overlayRotation = (faceTracker.overlayRotation + 1) % 4
+            if (faceTracker.overlayRotation == 0) faceTracker.overlayMirror = !faceTracker.overlayMirror
+            Toast.makeText(
+                this,
+                "overlay rot=${faceTracker.overlayRotation * 90} mirror=${faceTracker.overlayMirror}",
+                Toast.LENGTH_LONG
+            ).show()
+            true
         }
         findViewById<Button>(R.id.btnFx).setOnClickListener { randomizeFx() }
         findViewById<Button>(R.id.btnReset).setOnClickListener { resetFx() }

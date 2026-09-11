@@ -61,6 +61,7 @@ class EffectsRenderer(
     var onRecordingStopped: ((String) -> Unit)? = null
     var onEncoderError: ((String) -> Unit)? = null
     var onSnapshotSaved: ((String) -> Unit)? = null
+    var onContextRecreated: (() -> Unit)? = null
 
     @Volatile var wireframe = true
     @Volatile var glReady = false
@@ -128,6 +129,7 @@ class EffectsRenderer(
     private var fpsCount = 0
     private var fpsTime = 0L
     private var readbackCount = 0
+    private var firstFrameLogged = false
 
     private var eglCtx14: EGLContext? = null
     private var eglCoreEnc: EglCore? = null
@@ -219,6 +221,17 @@ class EffectsRenderer(
 
     override fun onSurfaceCreated(gl: GL10?, config: javax.microedition.khronos.egl.EGLConfig?) {
         eglCtx14 = EGL14.eglGetCurrentContext()
+        if (surfaceTexture != null) {
+            // GL context was recreated while the camera still feeds the old SurfaceTexture:
+            // tear it down and force a camera rebind onto a fresh one.
+            Log.w(TAG, "GL context recreated - rebinding camera onto fresh SurfaceTexture")
+            try { surfaceTexture?.release() } catch (e: Exception) { Log.w(TAG, "st release", e) }
+            surfaceTexture = null
+            cameraSurface = null
+            pendingRequest = null
+            frameAvailable = false
+            onContextRecreated?.let { mainExecutor.execute(it) }
+        }
 
         val ids = IntArray(1)
         GLES20.glGenTextures(1, ids, 0)
@@ -337,7 +350,12 @@ class EffectsRenderer(
         if (frameAvailable) {
             try {
                 st.updateTexImage()
+                if (!firstFrameLogged) {
+                    firstFrameLogged = true
+                    Log.i(TAG, "first camera frame latched ts=" + st.timestamp + " texmat=" + texMatrix.contentToString())
+                }
             } catch (e: Exception) {
+                Log.e(TAG, "updateTexImage failed", e)
             }
             frameAvailable = false
         }

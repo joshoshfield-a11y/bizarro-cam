@@ -73,6 +73,10 @@ class EffectsRenderer(
     private fun onoff(v: Int): String = if (v > 0) "1" else "0"
 
     @Volatile var frontCamera = false
+        set(v) {
+            field = v
+            faceTracker.frontFacing = v
+        }
 
     private val mainExecutor = ContextCompat.getMainExecutor(context)
     private val ioExecutor = Executors.newSingleThreadExecutor()

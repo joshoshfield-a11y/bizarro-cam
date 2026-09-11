@@ -8,7 +8,6 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Size
 import android.view.Gravity
 import android.view.Surface
 import android.widget.Button
@@ -20,8 +19,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.Preview
-import androidx.camera.mlkit.vision.MLKitAnalyzer
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -233,32 +234,24 @@ class MainActivity : AppCompatActivity() {
         providerFuture.addListener({
             val provider = providerFuture.get()
             provider.unbindAll()
+            val rs16x9 = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(AspectRatioStrategy(AspectRatio.RATIO_16_9, AspectRatioStrategy.FALLBACK_RULE_AUTO))
+                .build()
             val preview = Preview.Builder()
-                .setTargetResolution(Size(720, 1280))
+                .setResolutionSelector(rs16x9)
                 .setTargetRotation(Surface.ROTATION_0)
                 .build()
             preview.setSurfaceProvider(Preview.SurfaceProvider { request ->
                 glView.queueEvent { renderer.attachSurfaceRequest(request) }
             })
             val analysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(480, 640))
+                .setResolutionSelector(rs16x9)
                 .setTargetRotation(Surface.ROTATION_0)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-            val mlAnalyzer = MLKitAnalyzer(
-                faceTracker.detector,
-                ImageAnalysis.COORDINATE_SYSTEM_VIEW_REFERENCED,
-                cameraExecutor
-            ) { result ->
-                val faces = result.getValue(faceTracker.detector) ?: emptyList()
-                val sz = result.size
-                if (sz != null) {
-                    faceTracker.frameW = sz.width
-                    faceTracker.frameH = sz.height
-                }
-                faceTracker.onFaces(faces)
+            analysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                faceTracker.analyze(imageProxy)
             }
-            analysis.setAnalyzer(cameraExecutor, mlAnalyzer)
             val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
             try {
                 camera = provider.bindToLifecycle(this, selector, preview, analysis)

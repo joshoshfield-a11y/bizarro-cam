@@ -53,7 +53,7 @@ class EffectsRenderer(
         private const val DISP = 512
         private const val GRID_COLS = 48
         private const val GRID_ROWS = 86
-        private const val MAXP = 160
+        private const val MAXP = 128
     }
 
     var onReady: (() -> Unit)? = null
@@ -67,6 +67,9 @@ class EffectsRenderer(
     @Volatile var glReady = false
     @Volatile var takeSnapshot = false
     @Volatile var fps = 0f
+    @Volatile var shaderStatus = "?"
+
+    private fun onoff(v: Int): String = if (v > 0) "1" else "0"
 
     @Volatile var frontCamera = false
         set(v) {
@@ -116,6 +119,7 @@ class EffectsRenderer(
     private var progComposite = 0
     private var progBlit = 0
     private var progLine = 0
+    private var progRaw = 0
 
     private var quadVbo = 0
     private var gridVbo = 0
@@ -247,6 +251,10 @@ class EffectsRenderer(
         progComposite = buildProgram(ShaderStore.GRID_VERT, ShaderStore.COMPOSITE_FRAG)
         progBlit = buildProgram(ShaderStore.QUAD_VERT, ShaderStore.BLIT_FRAG)
         progLine = buildProgram(ShaderStore.LINE_VERT, ShaderStore.LINE_FRAG)
+        progRaw = buildProgram(ShaderStore.QUAD_VERT, ShaderStore.RAW_FRAG)
+        shaderStatus = "disp=" + onoff(progDisp) + " comp=" + onoff(progComposite) +
+            " blit=" + onoff(progBlit) + " line=" + onoff(progLine) + " raw=" + onoff(progRaw)
+        Log.i(TAG, "shader status: " + shaderStatus)
 
         val quad = floatArrayOf(
             -1f, -1f, 0f, 0f,
@@ -392,6 +400,23 @@ class EffectsRenderer(
 
         buildPointArray()
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+        if (progComposite <= 0 && progRaw > 0) {
+            // heavy pipeline failed to compile on this driver: raw camera fallback
+            GLES20.glViewport(0, 0, viewW, viewH)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glUseProgram(progRaw)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
+            GLES20.glUniform1i(glLoc(progRaw, "uTex"), 0)
+            GLES20.glUniformMatrix4fv(glLoc(progRaw, "uTexMatrix"), 1, false, texMatrix, 0)
+            GLES20.glUniform4f(glLoc(progRaw, "uCrop"), 0f, 0f, 1f, 1f)
+            drawQuad(progRaw)
+            val crop2 = computeCrop(viewW, viewH)
+            if (wireframe && progLine > 0) drawLines(crop2)
+            curIdx = prevIdx
+            return
+        }
 
         if (progComposite > 0) {
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, stageFbo[curIdx])

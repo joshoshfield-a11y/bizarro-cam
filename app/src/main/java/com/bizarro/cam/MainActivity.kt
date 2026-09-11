@@ -280,8 +280,9 @@ class MainActivity : AppCompatActivity() {
     private val statsRunnable = object : Runnable {
         override fun run() {
             val recSec = if (recording) (SystemClock.elapsedRealtime() - recStartMs) / 1000 else 0
-            txtStats.text = "%.0f fps | faces %d | tracks %d%s".format(
+            txtStats.text = "%.0f fps | faces %d | tracks %d | sh %s%s".format(
                 renderer.fps, faceTracker.lastFaces, motionTracker.tracks.size,
+                renderer.shaderStatus,
                 if (recording) " | REC ${recSec}s" else ""
             )
             uiHandler.postDelayed(this, 500)

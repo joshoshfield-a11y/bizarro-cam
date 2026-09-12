@@ -16,6 +16,7 @@ import android.util.Log
 import android.view.Surface
 import androidx.camera.core.SurfaceRequest
 import androidx.core.content.ContextCompat
+import com.bizarro.cam.record.AudioPump
 import com.bizarro.cam.record.EglCore
 import com.bizarro.cam.record.VideoEncoder
 import com.bizarro.cam.vision.FaceTracker
@@ -131,6 +132,14 @@ class EffectsRenderer(
     private var gridData = FloatArray(0)
     private val pxx = FloatArray(MAXP)
     private val pyy = FloatArray(MAXP)
+    private var gridFbuf: FloatBuffer? = null
+    private var readbackBuf: ByteBuffer? = null
+    private val ripples = ArrayList<Ripple>()
+    private val audioPump = AudioPump()
+
+    @Volatile var audioReactive = false
+
+    private data class Ripple(val x: Float, val y: Float, val t0: Float)
 
     private var viewW = 1
     private var viewH = 1
@@ -314,6 +323,8 @@ class EffectsRenderer(
         GLES20.glGenBuffers(1, ids, 0)
         gridVbo = ids[0]
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, gridVbo)
+        gridFbuf = ByteBuffer.allocateDirect(gridData.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+        readbackBuf = ByteBuffer.allocateDirect(DISP * DISP * 4).order(ByteOrder.nativeOrder())
         GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, gridData.size * 4, floatBuffer(gridData), GLES20.GL_STREAM_DRAW)
         GLES20.glGenBuffers(1, ids, 0)
         gridIbo = ids[0]
@@ -410,15 +421,22 @@ class EffectsRenderer(
         }
 
         readbackCount++
-        if (readbackCount % 3 == 0) {
-            val buf = ByteBuffer.allocateDirect(DISP * DISP * 4).order(ByteOrder.nativeOrder())
+        val rb = readbackBuf
+        if (readbackCount % 3 == 0 && rb != null) {
+            rb.clear()
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, dispFbo)
-            GLES20.glReadPixels(0, 0, DISP, DISP, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
-            buf.rewind()
-            motionTracker.update(buf, DISP, DISP)
+            GLES20.glReadPixels(0, 0, DISP, DISP, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, rb)
+            rb.rewind()
+            motionTracker.update(rb, DISP, DISP)
         }
 
-        updateGridBuffers(t)
+        val aLvl = if (audioReactive) audioPump.level else 0f
+        val pEdge = param("edge") * (0.7f + 0.9f * aLvl)
+        val pGlitch = kotlin.math.max(param("glitch"), param("glitch") * aLvl * 1.8f)
+        val pNoise = (param("noise") + aLvl * 0.12f).coerceAtMost(1f)
+        val pDisp = param("displace") * (1f + aLvl * 0.7f)
+        val pMorph = param("morph") * (1f + aLvl * 0.5f)
+        updateGridBuffers(t, pDisp, pMorph)
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
         if (progComposite <= 0 && progRaw > 0) {
@@ -434,6 +452,25 @@ class EffectsRenderer(
             drawQuad(progRaw)
             val crop2 = computeCrop(viewW, viewH)
             if (wireframe && progLine > 0) drawLines(crop2)
+            val encF = encoder
+            if (encF != null) {
+                val es = encEglSurface
+                val ecore = eglCoreEnc
+                if (es != null && ecore != null) {
+                    ecore.makeCurrent(es)
+                    GLES20.glViewport(0, 0, STAGE_W, STAGE_H)
+                    GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                    GLES20.glUseProgram(progRaw)
+                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTex)
+                    GLES20.glUniform1i(glLoc(progRaw, "uTex"), 0)
+                    GLES20.glUniformMatrix4fv(glLoc(progRaw, "uTexMatrix"), 1, false, texMatrix, 0)
+                    GLES20.glUniform4f(glLoc(progRaw, "uCrop"), 0f, 0f, 1f, 1f)
+                    drawQuad(progRaw)
+                    ecore.setPresentationTime(es, st.timestamp)
+                    ecore.swap(es)
+                }
+            }
             curIdx = prevIdx
             return
         }
@@ -455,14 +492,14 @@ class EffectsRenderer(
             GLES20.glUniformMatrix4fv(glLoc(progComposite, "uTexMatrix"), 1, false, texMatrix, 0)
             GLES20.glUniform2f(glLoc(progComposite, "uResolution"), STAGE_W.toFloat(), STAGE_H.toFloat())
             GLES20.glUniform1f(glLoc(progComposite, "uTime"), t)
-            GLES20.glUniform1f(glLoc(progComposite, "uEdge"), param("edge"))
+            GLES20.glUniform1f(glLoc(progComposite, "uEdge"), pEdge)
             GLES20.glUniform1f(glLoc(progComposite, "uDisplace"), param("displace"))
-            GLES20.glUniform1f(glLoc(progComposite, "uGlitch"), param("glitch"))
+            GLES20.glUniform1f(glLoc(progComposite, "uGlitch"), pGlitch)
             GLES20.glUniform1f(glLoc(progComposite, "uPoster"), param("poster"))
             GLES20.glUniform1f(glLoc(progComposite, "uChroma"), param("chroma"))
             GLES20.glUniform1f(glLoc(progComposite, "uHue"), param("hue"))
             GLES20.glUniform1f(glLoc(progComposite, "uEcho"), param("echo"))
-            GLES20.glUniform1f(glLoc(progComposite, "uNoise"), param("noise"))
+            GLES20.glUniform1f(glLoc(progComposite, "uNoise"), pNoise)
             GLES20.glUniform1f(glLoc(progComposite, "uSlit"), param("slit"))
             GLES20.glUniform1f(glLoc(progComposite, "uKaleido"), param("kaleido"))
             GLES20.glUniform1f(glLoc(progComposite, "uInvert"), param("invert"))
@@ -611,7 +648,7 @@ class EffectsRenderer(
 
     // ---------------------------------------------------------------- utils
 
-    private fun updateGridBuffers(t: Float) {
+    private fun updateGridBuffers(t: Float, meshAmp: Float, morph: Float) {
         var n = 0
         val fp = faceTracker.points
         val fn = kotlin.math.min(faceTracker.count, MAXP - 30)
@@ -626,8 +663,10 @@ class EffectsRenderer(
             pyy[n] = tk.cy
             n++
         }
-        val meshAmp = param("displace")
-        val morph = param("morph")
+        val rit = ripples.iterator()
+        while (rit.hasNext()) {
+            if (t - rit.next().t0 > 1.4f) rit.remove()
+        }
         val t1 = t * 1.9f
         val t2 = t * 1.3f
         val t3 = t * 2.3f
@@ -657,67 +696,59 @@ class EffectsRenderer(
                 dx /= wsum
                 dy /= wsum
             }
+            var rxs = 0f
+            var rys = 0f
+            for (r in ripples) {
+                val age = t - r.t0
+                if (age < 0f) continue
+                val dvx = u - r.x
+                val dvy = vv - r.y
+                val l = kotlin.math.hypot(dvx, dvy) + 1e-4f
+                val wave = kotlin.math.sin((l - age * 0.55f) * 34f) *
+                    kotlin.math.exp(-age * 3.0f) * kotlin.math.exp(-l * 5f)
+                rxs += dvx / l * wave
+                rys += dvy / l * wave
+            }
             val n1 = kotlin.math.sin(vv * 21f + t1) * kotlin.math.cos(u * 17f - t2)
             val n2 = kotlin.math.sin(u * 29f - t3 + vv * 7f)
-            gridData[o + 4] = dx * meshAmp * 0.10f + n1 * 0.006f * meshAmp
-            gridData[o + 5] = dy * meshAmp * 0.10f + n2 * 0.006f * meshAmp
+            gridData[o + 4] = dx * meshAmp * 0.10f + n1 * 0.006f * meshAmp + rxs * 0.05f
+            gridData[o + 5] = dy * meshAmp * 0.10f + n2 * 0.006f * meshAmp + rys * 0.05f
             gridData[o + 6] = wx * morph * 0.10f
             gridData[o + 7] = wy * morph * 0.10f
             v++
         }
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, gridVbo)
-        GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, gridData.size * 4, floatBuffer(gridData), GLES20.GL_STREAM_DRAW)
-    }
-
-    private fun computeCrop(vw: Int, vh: Int): FloatArray {
-        val frameA = STAGE_W.toFloat() / STAGE_H
-        val viewA = vw.toFloat() / vh
-        return if (viewA > frameA) {
-            val fh = frameA / viewA
-            floatArrayOf(0f, (1f - fh) / 2f, 1f, (1f + fh) / 2f)
-        } else {
-            val fw = viewA / frameA
-            floatArrayOf((1f - fw) / 2f, 0f, (1f + fw) / 2f, 1f)
+        val fb = gridFbuf
+        if (fb != null) {
+            fb.clear()
+            fb.put(gridData)
+            fb.position(0)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, gridVbo)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, gridData.size * 4, fb, GLES20.GL_STREAM_DRAW)
         }
     }
 
-    private fun saveSnapshot() {
-        try {
-            val buf = ByteBuffer.allocateDirect(STAGE_W * STAGE_H * 4).order(ByteOrder.nativeOrder())
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, stageFbo[curIdx])
-            GLES20.glReadPixels(0, 0, STAGE_W, STAGE_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
-            buf.rewind()
-            ioExecutor.execute {
-                try {
-                    val bmp = Bitmap.createBitmap(STAGE_W, STAGE_H, Bitmap.Config.ARGB_8888)
-                    bmp.copyPixelsFromBuffer(buf)
-                    val m = Matrix().apply { postScale(1f, -1f) }
-                    val flipped = Bitmap.createBitmap(bmp, 0, 0, STAGE_W, STAGE_H, m, false)
-                    val dir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir
-                    val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                    val f = File(dir, "BizarroCam_$ts.png")
-                    FileOutputStream(f).use { flipped.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                    onSnapshotSaved?.let { mainExecutor.execute { it(f.absolutePath) } }
-                } catch (e: Exception) {
-                    Log.e(TAG, "save", e)
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "snapshot", e)
+    fun queueRipple(fx: Float, fy: Float) {
+        val crop = computeCrop(viewW, viewH)
+        val sx = ((fx - crop[0]) / (crop[2] - crop[0])).coerceIn(0f, 1f)
+        val sy = ((fy - crop[1]) / (crop[3] - crop[1])).coerceIn(0f, 1f)
+        val now = (SystemClock.elapsedRealtime() - startMs) / 1000f
+        view?.queueEvent {
+            if (ripples.size < 10) ripples.add(Ripple(sx, sy, now))
         }
     }
 
-    private fun drawQuad(prog: Int) {
-        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, quadVbo)
-        val aPos = GLES20.glGetAttribLocation(prog, "aPos")
-        val aUV = GLES20.glGetAttribLocation(prog, "aUV")
-        GLES20.glEnableVertexAttribArray(aPos)
-        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 16, 0)
-        GLES20.glEnableVertexAttribArray(aUV)
-        GLES20.glVertexAttribPointer(aUV, 2, GLES20.GL_FLOAT, false, 16, 8)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        GLES20.glDisableVertexAttribArray(aPos)
-        GLES20.glDisableVertexAttribArray(aUV)
+    fun toggleAudioReactive(): Boolean {
+        audioReactive = !audioReactive
+        if (audioReactive) audioPump.start() else audioPump.stop()
+        return audioReactive
+    }
+
+    fun onHostPause() {
+        if (audioReactive) audioPump.stop()
+    }
+
+    fun onHostResume() {
+        if (audioReactive) audioPump.start()
     }
 
     private fun drawGrid() {

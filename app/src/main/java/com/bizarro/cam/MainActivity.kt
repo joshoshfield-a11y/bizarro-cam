@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.Surface
 import android.widget.Button
 import android.widget.LinearLayout
@@ -58,6 +59,8 @@ class MainActivity : AppCompatActivity() {
     private var cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var recording = false
     private var recStartMs = 0L
+    private var wantSync = false
+    private var wantRec = false
     private lateinit var btnRec: Button
     private lateinit var txtStats: TextView
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -126,6 +129,14 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnReset).setOnClickListener { resetFx() }
         btnRec.setOnClickListener { toggleRecording() }
         findViewById<Button>(R.id.btnShot).setOnClickListener { renderer.takeSnapshot = true }
+        findViewById<Button>(R.id.btnSync).setOnClickListener { toggleSync() }
+        glView.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE ->
+                    renderer.queueRipple(ev.x / glView.width.toFloat(), ev.y / glView.height.toFloat())
+            }
+            false
+        }
         checkPermissions()
     }
 
@@ -215,11 +226,17 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_PERMS) tryBindCamera()
         if (requestCode == REQ_AUDIO) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            if (granted && wantRec) {
+                wantRec = false
                 startRecording()
-            } else {
-                Toast.makeText(this, "Mic denied - cannot record audio", Toast.LENGTH_SHORT).show()
             }
+            if (granted && wantSync) {
+                wantSync = false
+                val on = renderer.toggleAudioReactive()
+                Toast.makeText(this, if (on) "audio-reactive ON - make noise" else "audio-reactive OFF", Toast.LENGTH_SHORT).show()
+            }
+            if (!granted) Toast.makeText(this, "Mic denied", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -269,10 +286,21 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            wantRec = true
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO)
             return
         }
         startRecording()
+    }
+
+    private fun toggleSync() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            wantSync = true
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), REQ_AUDIO)
+            return
+        }
+        val on = renderer.toggleAudioReactive()
+        Toast.makeText(this, if (on) "audio-reactive ON - make noise" else "audio-reactive OFF", Toast.LENGTH_SHORT).show()
     }
 
     private fun startRecording() {
@@ -285,10 +313,11 @@ class MainActivity : AppCompatActivity() {
     private val statsRunnable = object : Runnable {
         override fun run() {
             val recSec = if (recording) (SystemClock.elapsedRealtime() - recStartMs) / 1000 else 0
-            txtStats.text = "%.0f fps | faces %d | tracks %d | sh %s%s".format(
+            val rec = if (recording) " | REC ${recSec}s" else ""
+            val sync = if (renderer.audioReactive) " | SYNC" else ""
+            txtStats.text = "%.0f fps | faces %d | tracks %d | sh %s%s%s".format(
                 renderer.fps, faceTracker.lastFaces, motionTracker.tracks.size,
-                renderer.shaderStatus,
-                if (recording) " | REC ${recSec}s" else ""
+                renderer.shaderStatus, rec, sync
             )
             uiHandler.postDelayed(this, 500)
         }
@@ -297,11 +326,13 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         glView.onResume()
+        renderer.onHostResume()
         uiHandler.post(statsRunnable)
     }
 
     override fun onPause() {
         uiHandler.removeCallbacks(statsRunnable)
+        renderer.onHostPause()
         glView.onPause()
         super.onPause()
     }

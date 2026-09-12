@@ -751,6 +751,57 @@ class EffectsRenderer(
         if (audioReactive) audioPump.start()
     }
 
+    private fun computeCrop(vw: Int, vh: Int): FloatArray {
+        val frameA = STAGE_W.toFloat() / STAGE_H
+        val viewA = vw.toFloat() / vh
+        return if (viewA > frameA) {
+            val fh = frameA / viewA
+            floatArrayOf(0f, (1f - fh) / 2f, 1f, (1f + fh) / 2f)
+        } else {
+            val fw = viewA / frameA
+            floatArrayOf((1f - fw) / 2f, 0f, (1f + fw) / 2f, 1f)
+        }
+    }
+
+    private fun saveSnapshot() {
+        try {
+            val buf = ByteBuffer.allocateDirect(STAGE_W * STAGE_H * 4).order(ByteOrder.nativeOrder())
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, stageFbo[curIdx])
+            GLES20.glReadPixels(0, 0, STAGE_W, STAGE_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
+            buf.rewind()
+            ioExecutor.execute {
+                try {
+                    val bmp = Bitmap.createBitmap(STAGE_W, STAGE_H, Bitmap.Config.ARGB_8888)
+                    bmp.copyPixelsFromBuffer(buf)
+                    val m = Matrix().apply { postScale(1f, -1f) }
+                    val flipped = Bitmap.createBitmap(bmp, 0, 0, STAGE_W, STAGE_H, m, false)
+                    val dir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir
+                    val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                    val f = File(dir, "BizarroCam_$ts.png")
+                    FileOutputStream(f).use { flipped.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                    onSnapshotSaved?.let { mainExecutor.execute { it(f.absolutePath) } }
+                } catch (e: Exception) {
+                    Log.e(TAG, "save", e)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "snapshot", e)
+        }
+    }
+
+    private fun drawQuad(prog: Int) {
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, quadVbo)
+        val aPos = GLES20.glGetAttribLocation(prog, "aPos")
+        val aUV = GLES20.glGetAttribLocation(prog, "aUV")
+        GLES20.glEnableVertexAttribArray(aPos)
+        GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 16, 0)
+        GLES20.glEnableVertexAttribArray(aUV)
+        GLES20.glVertexAttribPointer(aUV, 2, GLES20.GL_FLOAT, false, 16, 8)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        GLES20.glDisableVertexAttribArray(aPos)
+        GLES20.glDisableVertexAttribArray(aUV)
+    }
+
     private fun drawGrid() {
         GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, gridVbo)
         GLES20.glBindBuffer(GLES20.GL_ELEMENT_ARRAY_BUFFER, gridIbo)
